@@ -1,0 +1,8 @@
+/target
+*.out
+Mesh
+*.cpp
+*.log
+.DS_Store
+Modelfile
+.vscode

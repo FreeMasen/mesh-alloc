@@ -1,0 +1,15 @@
+[package]
+name = "mesh-alloc"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+cordyceps = "0.3.4"
+libc = "0.2.172"
+page_size = "0.6.0"
+rand = { version = "0.9", features = [] }
+rand_xoshiro = "0.7.0"
+rustix = { version = "1.0.7", features = ["mm"] }
+thiserror = "2.0.12"
