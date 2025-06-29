@@ -25,9 +25,7 @@ use crate::{mmap_heap::MmapHeap, one_way_mmap_heap::OneWayMmapHeap, slab::Slab};
 // // Fast allocation for a single size-class
 // template <size_t allocSize, size_t maxCount>
 // class CheapHeap : public OneWayMmapHeap {
-pub struct CheapHeap {
-    alloc_size: usize,
-    max_count: usize,
+pub struct CheapHeap<const ALLOC_SIZE: usize, const MAX_COUNT: usize> {
     // protected:
     //   char *_arena{nullptr};
     _arena: *mut u8,
@@ -40,7 +38,7 @@ pub struct CheapHeap {
     // };
 }
 
-impl CheapHeap {
+impl<const ALLOC_SIZE: usize, const MAX_COUNT: usize> CheapHeap<ALLOC_SIZE, MAX_COUNT> {
     fn allocate_one_way(size: usize) -> *mut u8 {
         OneWayMmapHeap::malloc(size).cast()
     }
@@ -54,13 +52,13 @@ impl CheapHeap {
     // public:
     //   // cacheline-sized alignment
     //   enum { Alignment = 64 };
-    pub fn new(alloc_size: usize, max_count: usize) -> Self {
+    pub fn new() -> Self {
         //   CheapHeap() : SuperHeap() {
         //     // TODO: check allocSize + maxCount doesn't overflow?
         //     _arena = reinterpret_cast<char *>(SuperHeap::malloc(allocSize * maxCount));
-        let _arena: *mut u8 = OneWayMmapHeap::malloc(alloc_size * max_count).cast();
+        let _arena: *mut u8 = OneWayMmapHeap::malloc(ALLOC_SIZE * MAX_COUNT).cast();
         //     _freelist = reinterpret_cast<void **>(SuperHeap::malloc(maxCount * sizeof(void *)));
-        let _free_list = Slab::try_allocate(max_count, Self::allocate_one_way).unwrap();
+        let _free_list = Slab::try_allocate(MAX_COUNT, Self::allocate_one_way).unwrap();
         //     hard_assert(_arena != nullptr);
         //     hard_assert(_freelist != nullptr);
         //     d_assert(reinterpret_cast<uintptr_t>(_arena) % Alignment == 0);
@@ -72,8 +70,6 @@ impl CheapHeap {
             _free_list,
             _arena_offset: 0,
             _free_list_off: None,
-            alloc_size,
-            max_count,
         }
     }
 
@@ -90,7 +86,7 @@ impl CheapHeap {
         let Some(off) = self._arena_offset.checked_add(1) else {
             panic!("arena overflow")
         };
-        if off > self.max_count {
+        if off > MAX_COUNT {
             panic!("arena exhausted")
         }
         self._arena_offset = off;
@@ -106,17 +102,22 @@ impl CheapHeap {
     //   constexpr size_t getSize(void *ATTRIBUTE_UNUSED ptr) const {
     pub fn get_size(&self, _: *mut c_void) -> usize {
         //     return allocSize;
-        self.alloc_size
+        ALLOC_SIZE
         //   }
     }
 
     //   inline void free(void *ptr) {
     pub fn free(&mut self, ptr: *mut u8) {
-        println!("{:?} > {ptr:?} < {:x?}", self._arena, self.offset_after_arena());
+        println!(
+            "{:?} > {ptr:?} < {:x?}",
+            self._arena,
+            self.offset_after_arena()
+        );
         //     d_assert(ptr >= _arena);
         assert!(ptr.cast() >= self._arena);
         //     d_assert(ptr < arenaEnd());
-        assert!((ptr as usize) < self.offset_after_arena());
+        debug_assert!((ptr as usize) < self.offset_after_arena(), 
+            "attempt to free pointer from another heap: {} >= {}", ptr as usize, self.offset_after_arena());
         // assert!(ptr.cast() < unsafe { self._arena.add(count)});
         //     _freelistOff++;
         //     _freelist[_freelistOff] = ptr;
@@ -148,7 +149,7 @@ impl CheapHeap {
         //     d_assert(ptrval >= arena);
         debug_assert!(ptr_val >= arena, "Expected {ptr_val:?} to be >= {arena:?}");
         //     return (ptrval - arena) / allocSize;
-        ptr_val - arena / self.alloc_size
+        ptr_val - arena / ALLOC_SIZE
         //   }
     }
 
@@ -157,16 +158,14 @@ impl CheapHeap {
         //     d_assert(off < _arenaOff);
         // debug_assert!(off < self._arena_offset);
         //     return _arena + off * allocSize;
-        unsafe { self._arena.add(off * self.alloc_size) }
+        unsafe { self._arena.add(off * ALLOC_SIZE) }
         //   }
     }
 
     //   inline char *arenaEnd() const {
     pub fn offset_after_arena(&self) -> usize {
         let arena = self._arena as usize;
-        let ret = arena + (self.alloc_size * self.max_count);
-        println!("{ret} = {arena} + ({} * {})", self.alloc_size, self.max_count);
-        ret
+        arena + (ALLOC_SIZE * MAX_COUNT) + 1
     }
     //     return _arena + allocSize * maxCount;
     //   }
@@ -256,37 +255,73 @@ impl CheapHeap {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use paste::paste;
 
     use super::*;
 
-    #[test]
-    fn does_it_work() {
-        for i in 1..1024 {
-            do_general_test(1, 1);
-        }
-    }
+    macro_rules! generate_test_for {
+        ($alloc_size:literal, $max_count:literal) => {
+            paste! {
+                #[test]
+                fn [<generate_test_ $alloc_size _ $max_count>]() {
+                    do_general_test::<$alloc_size, $max_count>();
+                }
+            }
+        };
 
-    fn do_general_test(alloc_size: usize, max_count: usize) {
-        let mut cheap = CheapHeap::new(alloc_size, max_count);
-        let mut ps = HashSet::with_capacity(max_count);
-        for i in 0..max_count {
+    }
+    /*16,  16,  32,  48,  64,  80,  96,  112,  128,  160,  192,  224,   256,
+    320, 384, 448, 512, 640, 768, 896, 1024, 2048, 4096, 8192, 16384, */
+    generate_test_for!(16, 0x800000);
+    generate_test_for!(16, 512);
+    generate_test_for!(32, 512);
+    generate_test_for!(48, 512);
+    generate_test_for!(64, 512);
+    generate_test_for!(80, 512);
+    generate_test_for!(96, 512);
+    generate_test_for!(112, 512);
+    generate_test_for!(128, 512);
+    generate_test_for!(160, 512);
+    generate_test_for!(192, 512);
+    generate_test_for!(224, 512);
+    generate_test_for!(256, 512);
+    generate_test_for!(320, 512);
+    generate_test_for!(384, 512);
+    generate_test_for!(448, 512);
+    generate_test_for!(512, 512);
+    generate_test_for!(640, 512);
+    generate_test_for!(768, 512);
+    generate_test_for!(896, 512);
+    generate_test_for!(1024, 512);
+    generate_test_for!(2048, 512);
+    generate_test_for!(4096, 512);
+    generate_test_for!(8192, 512);
+    generate_test_for!(16384, 512);
+    generate_test_for!(16384, 0x800000);
+    // 768, 896, 1024, 2048, 4096, 8192, 16384,
+
+    fn do_general_test<const ALLOC_SIZE: usize, const MAX_COUNT: usize>() {
+        let mut cheap = CheapHeap::<ALLOC_SIZE, MAX_COUNT>::new();
+        let mut ps = HashSet::with_capacity(MAX_COUNT);
+        for i in 0..MAX_COUNT {
             assert_eq!(cheap._arena_offset, i);
             let p = cheap.alloc();
             assert!(ps.insert(p), "Allocation {i} already in use");
         }
-        assert_eq!(cheap._arena_offset, max_count);
+        assert_eq!(cheap._arena_offset, MAX_COUNT);
         assert_eq!(cheap._free_list_off, None);
         for (idx, ptr) in ps.into_iter().enumerate() {
+            println!("!!!: {:?}, {}", cheap._free_list_off, MAX_COUNT - idx - 1);
             cheap.free(ptr);
-            assert_eq!(cheap._free_list_off, Some(max_count - idx - 1));
+            assert_eq!(cheap._free_list_off, Some(idx));
         }
     }
 
     #[test]
-    #[should_panic = ""]
+    #[should_panic = "attempt to free pointer from another heap: "]
     fn free_wrong_heap() {
-        let mut h1 = CheapHeap::new(1, 8);
-        let mut h2 = CheapHeap::new(1, 8);
+        let mut h1 = CheapHeap::<1, 8>::new();
+        let mut h2 = CheapHeap::<1, 8>::new();
         let _p1 = h1.alloc();
         let p1 = h1.alloc();
         let _p2 = h2.alloc();

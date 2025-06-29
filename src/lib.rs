@@ -10,6 +10,11 @@ pub mod one_way_mmap_heap;
 pub mod shuffle_vec;
 pub mod slab;
 pub mod span;
+pub mod common;
+pub mod runtime;
+pub mod global_heap;
+pub mod meshable_arena;
+pub mod partitioned_heap;
 
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use shuffle_vec::ShuffleVector;

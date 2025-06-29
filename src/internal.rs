@@ -1,14 +1,8 @@
 use cordyceps::{
-    list::{self as cordy_list, List},
     Linked,
+    list::{self as cordy_list, List},
 };
-use std::{
-    ffi::c_void,
-    pin::Pin,
-    ptr::{self, NonNull},
-    sync::Arc,
-    thread,
-};
+use std::{ffi::c_void, marker::PhantomData, pin::Pin, ptr::{self, NonNull}, sync::Arc, thread};
 // // -*- mode: c++; c-basic-offset: 2; indent-tabs-mode: nil -*-
 // // Copyright 2019 The Mesh Authors. All rights reserved.
 // // Use of this source code is governed by the Apache License,
@@ -57,7 +51,7 @@ use std::{
 
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
-use crate::{mini_heap::MiniHeap, PAGE_SIZE};
+use crate::{common, mini_heap::MiniHeap, PAGE_SIZE};
 
 const SPAN_CLASS_COUNT: u32 = 256;
 
@@ -77,7 +71,7 @@ pub enum PageType {
 // }  // namespace internal
 
 // class MiniHeapID {
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct MiniHeapId(RawFd);
 
 // public:
@@ -130,6 +124,8 @@ impl AsRawFd for MiniHeapId {
     }
 }
 
+
+
 // namespace list {
 // static constexpr MiniHeapID Head{UINT32_MAX};
 pub mod list {
@@ -154,226 +150,308 @@ pub mod list {
 // MiniHeapID GetMiniHeapID(const MiniHeap *mh);
 
 // typedef std::array<MiniHeap *, kMaxSplitListSize> SplitArray;
+pub type SplitArray = [*mut MiniHeap;common::MAX_SPLIT_LIST_SIZE];
 // typedef std::array<std::pair<MiniHeap *, MiniHeap *>, kMaxMergeSets> MergeSetArray;
+pub type MergeSetArray = [(*mut MiniHeap, *mut MiniHeap ); common::MAX_MERGE_SETS];
 
-pub struct MiniHeapList(List<MiniHeapListEntry>);
+// pub struct MiniHeapList(List<MiniHeapListEntry>);
 
-pub struct MiniHeapListEntry {
-    id: MiniHeapId,
-    heap: MiniHeap,
-    links: cordyceps::list::Links<Self>,
-}
+// pub struct MiniHeapListEntry {
+//     pub id: MiniHeapId,
+//     pub heap: MiniHeap,
+//     pub links: cordyceps::list::Links<Self>,
+// }
 
-unsafe impl cordyceps::Linked<cordyceps::list::Links<Self>> for MiniHeapListEntry {
-    type Handle = Pin<Box<Self>>;
+// unsafe impl cordyceps::Linked<cordyceps::list::Links<Self>> for MiniHeapListEntry {
+//     type Handle = Pin<Box<Self>>;
 
-    fn into_ptr(r: Self::Handle) -> std::ptr::NonNull<Self> {
-        unsafe { NonNull::from(Box::leak(Pin::into_inner_unchecked(r))) }
-    }
+//     fn into_ptr(r: Self::Handle) -> std::ptr::NonNull<Self> {
+//         unsafe { NonNull::from(Box::leak(Pin::into_inner_unchecked(r))) }
+//     }
 
-    unsafe fn from_ptr(ptr: std::ptr::NonNull<Self>) -> Self::Handle {
-        // Safety: if this function is only called by the linked list
-        // implementation (and it is not intended for external use), we can
-        // expect that the `NonNull` was constructed from a reference which
-        // was pinned.
-        //
-        // If other callers besides `List`'s internals were to call this on
-        // some random `NonNull<Entry>`, this would not be the case, and
-        // this could be constructing an erroneous `Pin` from a referent
-        // that may not be pinned!
-        Pin::new_unchecked(Box::from_raw(ptr.as_ptr()))
-    }
+//     unsafe fn from_ptr(ptr: std::ptr::NonNull<Self>) -> Self::Handle {
+//         // Safety: if this function is only called by the linked list
+//         // implementation (and it is not intended for external use), we can
+//         // expect that the `NonNull` was constructed from a reference which
+//         // was pinned.
+//         //
+//         // If other callers besides `List`'s internals were to call this on
+//         // some random `NonNull<Entry>`, this would not be the case, and
+//         // this could be constructing an erroneous `Pin` from a referent
+//         // that may not be pinned!
+//         Pin::new_unchecked(Box::from_raw(ptr.as_ptr()))
+//     }
 
-    unsafe fn links(ptr: std::ptr::NonNull<Self>) -> NonNull<cordy_list::Links<Self>> {
-        // Using `ptr::addr_of_mut!` permits us to avoid creating a temporary
-        // reference without using layout-dependent casts.
-        let links = ptr::addr_of_mut!((*ptr.as_ptr()).links);
+//     unsafe fn links(ptr: std::ptr::NonNull<Self>) -> NonNull<cordy_list::Links<Self>> {
+//         // Using `ptr::addr_of_mut!` permits us to avoid creating a temporary
+//         // reference without using layout-dependent casts.
+//         let links = ptr::addr_of_mut!((*ptr.as_ptr()).links);
 
-        // `NonNull::new_unchecked` is safe to use here, because the pointer that
-        // we offset was not null, implying that the pointer produced by offsetting
-        // it will also not be null.
-        NonNull::new_unchecked(links)
-    }
+//         // `NonNull::new_unchecked` is safe to use here, because the pointer that
+//         // we offset was not null, implying that the pointer produced by offsetting
+//         // it will also not be null.
+//         NonNull::new_unchecked(links)
+//     }
+// }
+
+pub struct ListEntry<Id, Object> {
+    pub prev: Id,
+    pub next: Id,
+    _p: PhantomData<Object>,
 }
 // template <typename Object, typename ID>
 // class ListEntry {
 // public:
 //   typedef ListEntry<Object, ID> Entry;
-
+impl ListEntry<MiniHeapId, MiniHeap> {
 //   ListEntry() noexcept : _prev{}, _next{} {
 //   }
 
 //   explicit constexpr ListEntry(ID prev, ID next) : _prev{prev}, _next{next} {
 //   }
+    pub fn new(prev: MiniHeapId, next: MiniHeapId) -> Self {
+        Self {
+            prev,
+            next,
+            _p: PhantomData,
+        }
+    }
 
 //   ListEntry(const ListEntry &rhs) = default;
 //   ListEntry &operator=(const ListEntry &) = default;
-impl MiniHeapList {
-    //   inline bool empty() const {
-    pub fn empty(&self) -> bool {
-        //     return !_prev.hasValue() || !_next.hasValue();
-        self.0.is_empty()
-        //   }
+//   inline bool empty() const {
+//     return !_prev.hasValue() || !_next.hasValue();
+//   }
+
+//   inline ID next() const {
+    pub fn next(&self) -> MiniHeapId {
+//     return _next;
+        self.next
+//   }
+    }
+    
+
+//   inline ID prev() const {
+    pub fn prev(&self) -> MiniHeapId {
+//     return _prev;
+        self.prev
+//   }
     }
 
-    //   inline ID next() const {
-    //     return _next;
-    //   }
+//   inline void setNext(ID next) {
+    pub fn set_next(&mut self, next: MiniHeapId) {
+//     // mesh::debug("%p.setNext: %u\n", this, next);
+//     _next = next;
+        self.next = next;
+//   }
+    }
 
-    //   inline ID prev() const {
-    //     return _prev;
-    //   }
+//   inline void setPrev(ID prev) {
+    pub fn set_prev(&mut self, prev: MiniHeapId) {
+//     _prev = prev;
+        self.prev = prev;
+//   }
+    }
 
-    //   inline void setNext(ID next) {
-    //     // mesh::debug("%p.setNext: %u\n", this, next);
-    //     _next = next;
-    //   }
+//   // add calls remove for you
+//   void add(Entry *listHead, uint8_t listId, ID selfId, Object *newEntry) {
+    pub fn add(&mut self, list_head: *mut Self, list_id: u8, self_id: MiniHeapId, new_entry: *mut MiniHeap) {
+        let new_entry_ref = unsafe {new_entry.as_mut()}.unwrap();
+//     const uint8_t oldId = newEntry->freelistId();
+        let old_id = new_entry_ref.free_list_id();
+//     d_assert(oldId != listId);
+        debug_assert_ne!(old_id, list_id as u32);
+//     d_assert(!newEntry->isLargeAlloc());
+        debug_assert!(!new_entry_ref.is_large_alloc());
 
-    //   inline void setPrev(ID prev) {
-    //     _prev = prev;
-    //   }
+//     Entry *newEntryFreelist = newEntry->getFreelist();
+        let new_entry_free_list = new_entry_ref.get_free_list();
+        let new_entry_free_list = unsafe {
+            new_entry_free_list.as_mut()
+        }.unwrap();
+//     if (likely(newEntryFreelist->next().hasValue())) {
+        if new_entry_free_list.next().has_value() {
+//       // we will be part of a list every time except the first time add is called after alloc
+//       newEntryFreelist->remove(listHead);
+            new_entry_free_list.remove(list_head);
+//     }
+        }
 
-    //   // add calls remove for you
-    //   void add(Entry *listHead, uint8_t listId, ID selfId, Object *newEntry) {
-    pub fn add(&mut self, list_id: u8, self_id: MiniHeapId, new_entry: MiniHeap) {
-        //     const uint8_t oldId = newEntry->freelistId();
-        //     d_assert(oldId != listId);
-        //     d_assert(!newEntry->isLargeAlloc());
+//     newEntry->setFreelistId(listId);
+        new_entry_ref.set_free_list_id(list_id as u32);
 
-        //     Entry *newEntryFreelist = newEntry->getFreelist();
-        //     if (likely(newEntryFreelist->next().hasValue())) {
-        //       // we will be part of a list every time except the first time add is called after alloc
-        //       newEntryFreelist->remove(listHead);
-        //     }
-
-        //     newEntry->setFreelistId(listId);
-
-        //     const ID newEntryId = GetMiniHeapID(newEntry);
-        //     ID lastId = prev();
-        //     Entry *prevList = nullptr;
-        //     if (lastId == list::Head) {
-        //       prevList = this;
-        //     } else {
-        //       Object *last = GetMiniHeap(lastId);
-        //       prevList = last->getFreelist();
-        //     }
-        //     prevList->setNext(newEntryId);
+//     const ID newEntryId = GetMiniHeapID(newEntry);
+        let new_entry_id = todo!("GetMiniHeapID");
+//     ID lastId = prev();
+        let last_id = self.prev();
+//     Entry *prevList = nullptr;
+//     if (lastId == list::Head) {
+//       prevList = this;
+//     } else {
+//       Object *last = GetMiniHeap(lastId);
+//       prevList = last->getFreelist();
+//     }
+        let prev_list = if last_id == list::HEAD {
+            self as *mut _
+        } else {
+            let last: &mut MiniHeap = todo!("GetMiniHeap");
+            last.get_free_list()
+        };
+//     prevList->setNext(newEntryId);
+        unsafe {
+            prev_list.as_mut()
+        }.unwrap().set_next(new_entry_id);
         //     *newEntry->getFreelist() = ListEntry{lastId, selfId};
         //     this->setPrev(newEntryId);
-        //   }
+        *unsafe {new_entry_ref.get_free_list().as_mut()}.unwrap() = ListEntry::new(last_id, self_id);
+        self.set_prev(new_entry_id);
+//   }
     }
 
-    //   void remove(Entry *listHead) {
-    //     ID prevId = _prev;
-    //     ID nextId = _next;
-    //     // we may have just been created + not added to any freelist yet
-    //     if (!prevId.hasValue() || !nextId.hasValue()) {
-    //       return;
-    //     }
-    //     Entry *prev = nullptr;
-    //     if (prevId == list::Head) {
-    //       prev = listHead;
-    //     } else {
-    //       Object *mh = GetMiniHeap(prevId);
-    //       d_assert(mh != nullptr);
-    //       prev = mh->getFreelist();
-    //     }
-    //     Entry *next = nullptr;
-    //     if (nextId == list::Head) {
-    //       next = listHead;
-    //     } else {
-    //       Object *mh = GetMiniHeap(nextId);
-    //       d_assert(mh != nullptr);
-    //       next = mh->getFreelist();
-    //     }
+//   void remove(Entry *listHead) {
+    pub fn remove(&mut self, list_head: *mut Self) {
+//     ID prevId = _prev;
+//     ID nextId = _next;
+//     // we may have just been created + not added to any freelist yet
+//     if (!prevId.hasValue() || !nextId.hasValue()) {
+        if !self.prev.has_value() || !self.next.has_value() {
+        //       return;
+            return
+        //     }
+        }
+//     Entry *prev = nullptr;
+//     if (prevId == list::Head) {
+    let prev = if self.prev == list::HEAD {
+//       prev = listHead;
+        list_head
+//     } else {
+        } else {
+//       Object *mh = GetMiniHeap(prevId);
+            let mh: *mut MiniHeap = todo!("GetMiniHeap");
+            let mh = unsafe {
+                mh.as_mut()
+            }.unwrap();
+//       d_assert(mh != nullptr);
+//       prev = mh->getFreelist();
+            mh.get_free_list()
+//     }
+        };
+//     Entry *next = nullptr;
+        let next = if self.next == list::HEAD {
+//     if (nextId == list::Head) {
+//       next = listHead;
+            list_head
+        } else {
+//     } else {
+//       Object *mh = GetMiniHeap(nextId);
+            let mh: *mut MiniHeap = todo!("GetMiniHeap");
+//       d_assert(mh != nullptr);
+            let mh = unsafe {
+                 mh.as_mut().unwrap()
+            };
+//       next = mh->getFreelist();
+            mh.get_free_list()
+//     }
+        };
 
-    //     prev->setNext(nextId);
-    //     next->setPrev(prevId);
-    //     _prev = MiniHeapID{};
-    //     _next = MiniHeapID{};
-    //   }
+//     prev->setNext(nextId);
+        unsafe {
+            prev.as_mut()
+        }.unwrap().set_next(self.next);
+//     next->setPrev(prevId);
+        unsafe {
+            next.as_mut()
+        }.unwrap().set_prev(self.next);
+//     _prev = MiniHeapID{};
+        self.prev = MiniHeapId::new(0);
+//     _next = MiniHeapID{};
+        self.next = MiniHeapId::new(0);
+//   }
+    }
 
-    // private:
-    //   MiniHeapID _prev{};
-    //   MiniHeapID _next{};
-    // };
+// private:
+//   MiniHeapID _prev{};
+//   MiniHeapID _next{};
+// };
 }
 
 // typedef ListEntry<MiniHeap, MiniHeapID> MiniHeapListEntry;
+pub type MiniHeapListEntry = ListEntry<MiniHeapId, MiniHeap>;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Eq, Ord)]
 pub struct Span {
     // typedef uint32_t Offset;
-    offset: u32,
+    pub offset: u32,
     // typedef uint32_t Length;
-    length: u32,
+    pub length: u32,
 }
 // struct Span {
 //   // offset and length are in pages
 //   explicit Span(Offset _offset, Length _length) : offset(_offset), length(_length) {
 //   }
 impl Span {
-    //   Span(const Span &rhs) : offset(rhs.offset), length(rhs.length) {
-    //   }
+
+//   Span(const Span &rhs) : offset(rhs.offset), length(rhs.length) {
+//   }
     fn new(offset: u32, length: u32) -> Self {
         Self { offset, length }
     }
-    //   Span &operator=(const Span &rhs) {
-    //     offset = rhs.offset;
-    //     length = rhs.length;
-    //     return *this;
-    //   }
+//   Span &operator=(const Span &rhs) {
+//     offset = rhs.offset;
+//     length = rhs.length;
+//     return *this;
+//   }
 
-    //   Span(Span &&rhs) : offset(rhs.offset), length(rhs.length) {
-    //   }
+//   Span(Span &&rhs) : offset(rhs.offset), length(rhs.length) {
+//   }
 
-    //   bool empty() const {
-    //     return length == 0;
-    //   }
+//   bool empty() const {
+//     return length == 0;
+//   }
     pub fn empty(&self) -> bool {
         self.length == 0
     }
 
-    //   // reduce the size of this span to pageCount, return another span
-    //   // with the rest of the pages.
-    //   Span splitAfter(Length pageCount) {
+//   // reduce the size of this span to pageCount, return another span
+//   // with the rest of the pages.
+//   Span splitAfter(Length pageCount) {
     pub fn split_after(&mut self, page_count: u32) -> Span {
-        //     d_assert(pageCount <= length);
+//     d_assert(pageCount <= length);
         debug_assert!(page_count <= self.length);
-        //     auto restPageCount = length - pageCount;
+//     auto restPageCount = length - pageCount;
         let rest_page_count = self.length - page_count;
-        //     length = pageCount;
+//     length = pageCount;
         self.length = page_count;
-        //     return Span(offset + pageCount, restPageCount);
+//     return Span(offset + pageCount, restPageCount);
         Span::new(self.offset + page_count, rest_page_count)
-        //   }
+//   }
     }
 
-    //   uint32_t spanClass() const {
+//   uint32_t spanClass() const {
     pub fn span_class(&self) -> u32 {
-        //     return std::min(length, kSpanClassCount) - 1;
+//     return std::min(length, kSpanClassCount) - 1;
         self.length.min(SPAN_CLASS_COUNT) - 1
-        //   }
+//   }
     }
 
-    //   size_t byteLength() const {
+//   size_t byteLength() const {
     pub fn byte_length(&self) -> usize {
-        //     return length * kPageSize;
+//     return length * kPageSize;
         self.length as usize * PAGE_SIZE
-        //   }
+//   }
     }
 
-    //   inline bool operator==(const Span &rhs) {
-    //     return offset == rhs.offset && length == rhs.length;
-    //   }
+//   inline bool operator==(const Span &rhs) {
+//     return offset == rhs.offset && length == rhs.length;
+//   }
 
-    //   inline bool operator!=(const Span &rhs) {
-    //     return !(*this == rhs);
-    //   }
+//   inline bool operator!=(const Span &rhs) {
+//     return !(*this == rhs);
+//   }
 
-    //   Offset offset;
-    //   Length length;
-    // };
+//   Offset offset;
+//   Length length;
+// };
 }
 
 // // keep in-sync with the version in plasma/mesh.h
@@ -398,12 +476,14 @@ pub enum BitType {
 // size_t measurePssKiB();
 
 // inline void *MaskToPage(const void *ptr) {
-fn mask_to_page(ptr: *const c_void) -> *const c_void {
-    //   const auto ptrval = reinterpret_cast<uintptr_t>(ptr);
+fn mask_to_page(ptr: *const  c_void) -> *const c_void {
+//   const auto ptrval = reinterpret_cast<uintptr_t>(ptr);
     let ptr_val = ptr.addr();
-    //   return reinterpret_cast<void *>(ptrval & (uintptr_t) ~(CPUInfo::PageSize - 1));
-    ptr.map_addr(|ptr_val| ptr_val & !(PAGE_SIZE - 1))
-    // }
+//   return reinterpret_cast<void *>(ptrval & (uintptr_t) ~(CPUInfo::PageSize - 1));
+    ptr.map_addr(|ptr_val| {
+        ptr_val & !(PAGE_SIZE - 1)
+    })
+// }
 }
 
 // // efficiently copy data from srcFd to dstFd

@@ -1,12 +1,10 @@
 use std::{
-    os::fd::RawFd,
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
-    u8,
+    os::fd::RawFd, ptr::NonNull, sync::atomic::{AtomicU32, AtomicUsize, Ordering}, u8
 };
 
 use crate::{
-    bitmap::{Bitmap, Bitmapper, RelaxedFixedBitmap},
-    internal::{self, MiniHeapId, MiniHeapList},
+    bitmap::{AtomicBitmap, Bitmap, Bitmapper, RelaxedFixedBitmap},
+    internal::{self, ListEntry, MiniHeapId, MiniHeapListEntry, Span},
 };
 
 // // -*- mode: c++; c-basic-offset: 2; indent-tabs-mode: nil -*-
@@ -255,9 +253,9 @@ pub struct MiniHeap {
     //   internal::Bitmap _bitmap;           // 32 bytes 32
     _bitmap: crate::bitmap::Bitmap,
     //   const Span _span;                   // 8        40
-    // _span: todo!()
+    _span: Span,
     //   MiniHeapListEntry _freelist{};      // 8        48
-    free_list: MiniHeapList,
+    free_list: *mut ListEntry<MiniHeapId, MiniHeap>,
     //   atomic<pid_t> _current{0};          // 4        52
     _current: AtomicUsize,
     //   Flags _flags;                       // 4        56
@@ -265,7 +263,7 @@ pub struct MiniHeap {
     //   const float _objectSizeReciprocal;  // 4        60
     object_size_reciprocal: f32,
     //   MiniHeapID _nextMeshed{};           // 4        64
-    _next_meshed: MiniHeapList,
+    _next_meshed: MiniHeapId,
 }
 // private:
 //   DISALLOW_COPY_AND_ASSIGN(MiniHeap);
@@ -273,26 +271,42 @@ pub struct MiniHeap {
 impl MiniHeap {
     // public:
     //   MiniHeap(void *arenaBegin, Span span, size_t objectCount, size_t objectSize)
-    //       : _bitmap(objectCount),
-    //         _span(span),
-    //         _flags(objectCount, objectCount > 1 ? SizeMap::SizeClass(objectSize) : 1, 0, list::Attached),
-    //         _objectSizeReciprocal(1.0 / (float)objectSize) {
-    //     // debug("sizeof(MiniHeap): %zu", sizeof(MiniHeap));
+    pub fn new(arena_begin: *mut u8, span: Span, object_count: usize, object_size: usize) -> Self {
+        //       : _bitmap(objectCount),
+        //         _span(span),
+        //         _flags(objectCount, objectCount > 1 ? SizeMap::SizeClass(objectSize) : 1, 0, list::Attached),
+        //         _objectSizeReciprocal(1.0 / (float)objectSize) {
+        let bm = Bitmap::new_atomic();
+        let flags = Flags::new(object_count as _, object_size as _, 0, 0);
+        let osr = 1.0 / object_size as f32;
+        //     // debug("sizeof(MiniHeap): %zu", sizeof(MiniHeap));
+    
+        //     d_assert(_bitmap.inUseCount() == 0);
+        debug_assert!(bm.in_use_ct() == 0);
 
-    //     d_assert(_bitmap.inUseCount() == 0);
+        //     const auto expectedSpanSize = _span.byteLength();
+        //     d_assert_msg(expectedSpanSize == spanSize(), "span size %zu == %zu (%u, %u)", expectedSpanSize, spanSize(),
+        //                  maxCount(), this->objectSize());
+        
+        //     // d_assert_msg(spanSize == static_cast<size_t>(_spanSize), "%zu != %hu", spanSize, _spanSize);
+        //     // d_assert_msg(objectSize == static_cast<size_t>(objectSize()), "%zu != %hu", objectSize, _objectSize);
+    
+        //     d_assert(!_nextMeshed.hasValue());
+    
+        //     // debug("new:\n");
+        //     // dumpDebug();
+        Self {
+            _bitmap: bm,
+            _current: AtomicUsize::new(0),
+            _span: span,
+            _flags: flags,
+            object_size_reciprocal: osr,
+            _next_meshed: todo!(),
+            free_list: todo!(),
+        }
+        //   }
+    }
 
-    //     const auto expectedSpanSize = _span.byteLength();
-    //     d_assert_msg(expectedSpanSize == spanSize(), "span size %zu == %zu (%u, %u)", expectedSpanSize, spanSize(),
-    //                  maxCount(), this->objectSize());
-
-    //     // d_assert_msg(spanSize == static_cast<size_t>(_spanSize), "%zu != %hu", spanSize, _spanSize);
-    //     // d_assert_msg(objectSize == static_cast<size_t>(objectSize()), "%zu != %hu", objectSize, _objectSize);
-
-    //     d_assert(!_nextMeshed.hasValue());
-
-    //     // debug("new:\n");
-    //     // dumpDebug();
-    //   }
 
     //   ~MiniHeap() {
     //     // debug("destruct:\n");
@@ -300,8 +314,11 @@ impl MiniHeap {
     //   }
 
     //   inline Span span() const {
-    //     return _span;
-    //   }
+    pub fn span(&self) -> Span {
+        //     return _span;
+        self._span
+        //   }
+    }
     //   void printOccupancy() const {
     pub fn print_occupancy(&self) {
         println!(
@@ -318,12 +335,14 @@ impl MiniHeap {
     }
 
     //   inline void ATTRIBUTE_ALWAYS_INLINE free(void *arenaBegin, void *ptr) {
-    pub fn free(&mut self) {
+    pub fn free(&mut self, arena: NonNull<*mut u8>, ptr: NonNull<*mut u8>) {
         //     // the logic in globalFree is
         //     // updated to allow the 'race' between lock-free freeing and
         //     // meshing
         //     // d_assert(!isMeshed());
+        debug_assert!(!self.is_meshed());
         //     const ssize_t off = getOff(arenaBegin, ptr);
+        let off = self.get_off(arena, ptr);
         //     if (unlikely(off < 0)) {
         //       d_assert(false);
         //       return;
@@ -669,9 +688,9 @@ impl MiniHeap {
     }
 
     //   MiniHeapListEntry *getFreelist() {
-    pub fn get_free_list(&self) -> &MiniHeapList {
+    pub fn get_free_list(&self) -> *mut ListEntry<MiniHeapId, MiniHeap> {
         //     return &_freelist;
-        todo!()
+        self.free_list
         //   }
     }
 
@@ -734,8 +753,9 @@ impl MiniHeap {
     }
 
     //   inline uint8_t ATTRIBUTE_ALWAYS_INLINE getOff(const void *arenaBegin, void *ptr) const {
-    pub fn get_off(&self) -> u8 {
+    pub fn get_off(&self, arena: NonNull<*mut u8>, ptr: NonNull<*mut u8>) -> u8 {
         //     const auto span = spanStart(reinterpret_cast<uintptr_t>(arenaBegin), ptr);
+        let span = self.span_start(arena, ptr);
         //     d_assert(span != 0);
         //     const auto ptrval = reinterpret_cast<uintptr_t>(ptr);
 
@@ -749,32 +769,42 @@ impl MiniHeap {
 
     // protected:
     //   inline uintptr_t ATTRIBUTE_ALWAYS_INLINE spanStart(uintptr_t arenaBegin, void *ptr) const {
-    pub(crate) fn span_start(&self) -> usize {
+    pub(crate) fn span_start(&self, arena: NonNull<*mut u8>, ptr: NonNull<*mut u8>) -> usize {
         //     const auto ptrval = reinterpret_cast<uintptr_t>(ptr);
+        let ptr_val = ptr.addr().get();
         //     const auto len = _span.byteLength();
+        let len = self._span.byte_length();
 
         //     // manually unroll loop once to capture the common case of
         //     // un-meshed miniheaps
         //     uintptr_t spanptr = arenaBegin + _span.offset * kPageSize;
+        let span_ptr = unsafe {
+            arena.add(self._span.offset as _).addr().get() * page_size::get()
+        };
         //     if (likely(spanptr <= ptrval && ptrval < spanptr + len)) {
-        //       return spanptr;
-        //     }
-
+        if span_ptr < ptr_val && ptr_val < span_ptr + len {
+            //       return spanptr;
+            return span_ptr
+            //     }
+        }
         //     return spanStartSlowpath(arenaBegin, ptrval);
-        todo!()
+        self.span_start_slow_path(arena, ptr_val)
         //   }
     }
 
     //   uintptr_t ATTRIBUTE_NEVER_INLINE spanStartSlowpath(uintptr_t arenaBegin, uintptr_t ptrval) const {
-    pub fn span_start_slow_path(&self) -> usize {
+    pub fn span_start_slow_path(&self, arena: NonNull<*mut u8>, ptr_val: usize) -> usize {
         //     const auto len = _span.byteLength();
+        let len = self._span.byte_length();
         //     uintptr_t spanptr = 0;
-
+        let spanptr = 0;
         //     const MiniHeap *mh = this;
+        let mut mh = self;
         //     while (true) {
-        //       if (unlikely(!mh->_nextMeshed.hasValue())) {
-        //         abort();
-        //       }
+        loop {
+            //       if (unlikely(!mh->_nextMeshed.hasValue())) {
+            //         abort();
+            //       }
 
         //       mh = GetMiniHeap(mh->_nextMeshed);
 
@@ -784,7 +814,7 @@ impl MiniHeap {
         //         break;
         //       }
         //     };
-
+        }
         //     return spanptr;
         todo!()
         //   }

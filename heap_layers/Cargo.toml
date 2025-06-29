@@ -1,0 +1,26 @@
+[package]
+name = "heap_layers"
+version = "0.1.0"
+edition = "2024"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.0.7", features = ["mm"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = "0.61.3"
+
+[dependencies]
+hashbrown = { version = "0.15", default-features = false }
+allocator-api2 = { version = "0.2.9", default-features = false, features = [
+    "alloc",
+],  optional = true }
+ahash = {version = "0.8", default-features = false, features = [
+    "getrandom",
+    "runtime-rng"
+]}
+
+
+[features]
+default = ["dep:allocator-api2", "hashbrown/allocator-api2"]
+nightly = ["hashbrown/nightly"]
+hl-executable-heap = []

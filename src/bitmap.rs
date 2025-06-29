@@ -16,20 +16,8 @@ const fn word_bits() -> usize {
     word_bytes() * 8
 }
 
-const fn static_log(v: usize) -> usize {
-    if v == 1 {
-        0
-    } else if v == 2 {
-        1
-    } else if v > 1 {
-        static_log(v / 2) + 1
-    } else {
-        0
-    }
-}
-
 const fn word_bit_shift() -> usize {
-    static_log(word_bits())
+    crate::common::static_log(word_bits())
 }
 
 const fn rep_size(bit_ct: usize) -> usize {

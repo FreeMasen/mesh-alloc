@@ -67,7 +67,13 @@ impl OneWayMmapHeap {
         //     if (ptr == MAP_FAILED)
         //       abort();
         let ptr = unsafe {
-            rustix::mm::mmap_anonymous(null_mut(), sz, rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE, flags).unwrap()
+            rustix::mm::mmap_anonymous(
+                null_mut(),
+                sz,
+                rustix::mm::ProtFlags::READ | rustix::mm::ProtFlags::WRITE,
+                flags,
+            )
+            .unwrap()
         };
 
         //     d_assert(reinterpret_cast<size_t>(ptr) % Alignment == 0);
